@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block subheading %}Drag cards between columns · tasks are ranked by a smart priority score{% endblock %}
+{% block head %}
+<style>
+.kanban{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:start}
+.col{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:16px;min-height:420px;transition:.25s;backdrop-filter:blur(14px)}
+.col.over{border-color:var(--a1);background:color-mix(in srgb,var(--a1) 10%,var(--card));transform:scale(1.01)}
+.col-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;font-weight:600}
+.col-head .count{margin-left:auto}
+.task{background:var(--card-solid);border:1px solid var(--border);border-radius:16px;padding:14px;margin-bottom:12px;cursor:grab;transition:transform .2s,box-shadow .2s,opacity .2s;position:relative}
+.task:hover{transform:translateY(-3px);box-shadow:var(--shadow)}
+.task.dragging{opacity:.4;transform:rotate(2deg)}
+.task .title{font-weight:600;margin:6px 0 10px}
+.task .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.task .bar{position:absolute;left:0;top:14px;bottom:14px;width:4px;border-radius:0 4px 4px 0}
+.pomos{display:flex;gap:3px}.pomos i{font-size:11px}
+.task .del{position:absolute;top:10px;right:10px;opacity:0;transition:.2s;background:none;border:0;color:var(--muted);cursor:pointer}
+.task:hover .del{opacity:1}
+.done .task .title{text-decoration:line-through;color:var(--muted)}
+canvas#confetti{position:fixed;inset:0;pointer-events:none;z-index:90}
+@media(max-width:900px){.kanban{grid-template-columns:1fr}}
+</style>
+{% endblock %}
+{% block topbar_extra %}<button class="btn btn-primary btn-sm" data-modal="taskModal"><i class="bi bi-plus-lg"></i> New task</button>{% endblock %}
+{% block content %}
+<div class="grid g4 mb">
+  <div class="card hover fade-up"><div class="stat"><div class="ico"><i class="bi bi-fire"></i></div><div><div class="lbl">Current streak</div><div class="val"><span data-count="{{ s.streak }}">0</span> days</div></div></div></div>
+  <div class="card hover fade-up"><div class="stat"><div class="ico c3"><i class="bi bi-clock-history"></i></div><div><div class="lbl">Focused today</div><div class="val"><span data-count="{{ s.today_min }}">0</span> min</div></div></div></div>
+  <div class="card hover fade-up"><div class="stat"><div class="ico c5"><i class="bi bi-check2-all"></i></div><div><div class="lbl">Tasks completed</div><div class="val"><span id="doneCount" data-count="{{ s.done }}">0</span>/<span id="totalCount">{{ s.total_tasks }}</span></div></div></div></div>
+  <div class="card hover fade-up"><div class="stat"><div class="ico c4"><i class="bi bi-hourglass-split"></i></div><div><div class="lbl">Total focus</div><div class="val"><span data-count="{{ s.total_hours }}">0</span> h</div></div></div></div>
+</div>
+<div class="row mb" id="filters"><span class="chip active" data-s="">All subjects</span>
+  {% for sname, c in SUBJECTS.items() %}<span class="chip" data-s="{{ sname }}"><span style="width:8px;height:8px;border-radius:50%;background:{{ c }}"></span>{{ sname }}</span>{% endfor %}</div>
+<div class="kanban">
+  {% for key, label, icon in [('todo','To do','bi-circle'),('doing','In progress','bi-lightning-charge'),('done','Done','bi-check-circle')] %}
+  <div class="col fade-up {{ key }}" data-status="{{ key }}">
+    <div class="col-head"><i class="bi {{ icon }}" style="color:var(--a1)"></i>{{ label }}<span class="badge count" id="c-{{ key }}">0</span></div>
+    <div class="list" data-list="{{ key }}"></div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="modal" id="taskModal"><div class="box">
+  <h3>New task <button class="icon-btn" data-close><i class="bi bi-x-lg"></i></button></h3>
+  <form id="taskForm">
+    <div class="field"><label>Title</label><input class="input" name="title" required placeholder="e.g. Revise backpropagation"></div>
+    <div class="grid g2">
+      <div class="field"><label>Subject</label><select name="subject">{% for sname in SUBJECTS %}<option>{{ sname }}</option>{% endfor %}</select></div>
+      <div class="field"><label>Due date</label><input class="input" type="date" name="due"></div>
+      <div class="field"><label>Priority</label><select name="priority"><option value="1">Low</option><option value="2" selected>Medium</option><option value="3">High</option></select></div>
+      <div class="field"><label>Estimated pomodoros: <b id="estLbl">2</b></label><input type="range" name="est_pomos" min="1" max="12" value="2" oninput="estLbl.textContent=this.value"></div>
+    </div>
+    <button class="btn btn-primary btn-block"><i class="bi bi-plus-circle"></i> Add task</button>
+  </form>
+</div></div>
+<canvas id="confetti"></canvas>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='confetti.js') }}"></script>
+<script>
+const SUB = {{ SUBJECTS|tojson }}; let tasks = [], filter = '', q = '';
+const PRI = {1: ['Low', 'info'], 2: ['Medium', 'warning'], 3: ['High', 'danger']};
+const dueTxt = d => { if (!d) return ''; const n = Math.round((new Date(d) - new Date(new Date().toDateString())) / 864e5);
+  return n < 0 ? `<span style="color:var(--danger)"><i class="bi bi-exclamation-circle"></i> ${-n}d overdue</span>` : n === 0 ? '<span style="color:var(--warning)"><i class="bi bi-calendar-event"></i> Today</span>' : `<i class="bi bi-calendar3"></i> in ${n}d`; };
+function card(t) {
+  const p = Array.from({length: Math.min(t.est_pomos, 8)}, (_, i) => `<i class="bi ${i < t.done_pomos ? 'bi-circle-fill' : 'bi-circle'}" style="color:${SUB[t.subject] || 'var(--a1)'}"></i>`).join('');
+  return `<div class="task pop" draggable="true" data-id="${t.id}"><div class="bar" style="background:${SUB[t.subject] || 'var(--a1)'}"></div>
+    <button class="del" title="Delete"><i class="bi bi-x-lg"></i></button>
+    <div class="meta"><span class="badge" style="color:${SUB[t.subject]}">${esc(t.subject)}</span><span class="badge ${PRI[t.priority][1]}">${PRI[t.priority][0]}</span>
+      ${t.status !== 'done' ? `<span class="badge accent" title="Smart priority score"><i class="bi bi-stars"></i>${t.score}</span>` : ''}</div>
+    <div class="title">${esc(t.title)}</div>
+    <div class="meta"><span class="pomos">${p}</span><span>${t.done_pomos}/${t.est_pomos}</span><span style="margin-left:auto">${t.status !== 'done' ? dueTxt(t.due) : '<i class="bi bi-check2"></i> Completed'}</span></div></div>`;
+}
+function render() {
+  ['todo', 'doing', 'done'].forEach(s => {
+    let list = tasks.filter(t => t.status === s && (!filter || t.subject === filter) && (!q || t.title.toLowerCase().includes(q)));
+    if (s !== 'done') list.sort((a, b) => b.score - a.score);
+    document.querySelector(`[data-list=${s}]`).innerHTML = list.map(card).join('') || `<div class="empty small"><i class="bi bi-inbox"></i>Drop tasks here</div>`;
+    document.getElementById('c-' + s).textContent = list.length;
+  });
+  doneCount.textContent = tasks.filter(t => t.status === 'done').length; totalCount.textContent = tasks.length;
+}
+async function load() { tasks = await api('/api/tasks'); render(); }
+let dragId = null;
+document.addEventListener('dragstart', e => { const t = e.target.closest('.task'); if (!t) return; dragId = t.dataset.id; t.classList.add('dragging'); });
+document.addEventListener('dragend', e => e.target.closest('.task')?.classList.remove('dragging'));
+document.querySelectorAll('.col').forEach(col => {
+  col.addEventListener('dragover', e => { e.preventDefault(); col.classList.add('over'); });
+  col.addEventListener('dragleave', () => col.classList.remove('over'));
+  col.addEventListener('drop', async e => {
+    e.preventDefault(); col.classList.remove('over'); const status = col.dataset.status, t = tasks.find(x => x.id == dragId);
+    if (!t || t.status === status) return;
+    t.status = status; render();
+    const r = await api('/api/tasks/' + t.id, {method: 'PATCH', body: {status}});
+    if (r.celebrate) { confettiBurst(); toast('Task completed — great work! 🎉', 'success'); } else toast(`Moved to ${status === 'doing' ? 'In progress' : 'To do'}`, 'info', 1800);
+  });
+});
+document.addEventListener('click', async e => {
+  const d = e.target.closest('.task .del'); if (!d) return;
+  const el = d.closest('.task'); el.style.transform = 'scale(.8)'; el.style.opacity = 0;
+  await api('/api/tasks/' + el.dataset.id, {method: 'DELETE'}); tasks = tasks.filter(t => t.id != el.dataset.id); setTimeout(render, 200);
+});
+document.getElementById('filters').addEventListener('click', e => { const c = e.target.closest('.chip'); if (!c) return;
+  document.querySelectorAll('#filters .chip').forEach(x => x.classList.remove('active')); c.classList.add('active'); filter = c.dataset.s; render(); });
+document.getElementById('globalSearch').addEventListener('input', e => { q = e.target.value.toLowerCase(); render(); });
+document.getElementById('taskForm').addEventListener('submit', async e => {
+  e.preventDefault(); const t = await api('/api/tasks', {body: Object.fromEntries(new FormData(e.target))});
+  tasks.push(t); render(); e.target.reset(); estLbl.textContent = 2; document.getElementById('taskModal').classList.remove('open'); toast('Task added ✨', 'success');
+});
+load();
+</script>
+{% endblock %}
